@@ -65,5 +65,4 @@ void logger_print(const logger *l, const char *level, const char *fmt, ...)
 void logger_destroy(logger *l)
 {
     close(l->fd);
-    free(l);
 }

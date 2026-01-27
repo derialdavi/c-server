@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <signal.h>
 #include "logger.h"
 #include "request.h"
 #include <pthread.h>
@@ -12,13 +13,20 @@
 
 bool EOR(const char *buf, const size_t len);
 void *endpoint_handler(void *args);
+void sig_shutdown_server(int sig);
+
+/* declaring the server variable global in order
+ * to make operations on it when terminating the
+ * process.
+ */
+static server *s;
 
 server *server_setup(const int port)
 {
     if (port <= 0 || port > 65'535) return NULL;
 
     /* create and setup socket */
-    server *s = malloc(sizeof(server));
+    s = malloc(sizeof(server));
     if (s == NULL) return NULL;
 
     s->s_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -48,13 +56,15 @@ server *server_setup(const int port)
     return s;
 }
 
-void server_start_listening(server *s)
+void server_start_listening()
 {
     if (listen(s->s_fd, s->s_backlog) < 0)
     {
         logger_print(&s->s_logger, ERROR, "Error while listening new connections");
         exit(EXIT_FAILURE);
     }
+
+    signal(SIGINT, sig_shutdown_server);
 
     s->run = true;
     logger_print(&s->s_logger, INFO, "Listening for new connections at %d\n", s->s_port);
@@ -106,6 +116,13 @@ void server_start_listening(server *s)
     }
 }
 
+void server_destroy()
+{
+    logger_destroy(&s->s_logger);
+    close(s->s_fd);
+    free(s);
+}
+
 bool EOR(const char *buf, const size_t len)
 {
     return (buf[len-4] == '\r' && buf[len-2] == '\r'
@@ -124,4 +141,11 @@ void *endpoint_handler(void *args)
     close(req.client_fd);
 
     return NULL;
+}
+
+void sig_shutdown_server(int sig)
+{
+    (void)sig;
+    server_destroy();
+    exit(EXIT_SUCCESS);
 }

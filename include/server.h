@@ -17,6 +17,7 @@ typedef struct
 } server;
 
 server *server_setup(const int);
-void server_start_listening(server *);
+void server_start_listening();
+void server_destroy();
 
 #endif
