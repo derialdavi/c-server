@@ -8,8 +8,10 @@
 #include "logger.h"
 #include "request.h"
 #include <pthread.h>
+#include "response.h"
 #include <arpa/inet.h>
 #include <sys/types.h>
+#include "server_hashtable.h"
 
 bool EOR(const char *buf, const size_t len);
 void *endpoint_handler(void *args);
@@ -48,6 +50,9 @@ server *server_setup(const int port)
     s->s_port = port;
     s->s_backlog = DEFAULT_BACKLOG;
     s->run = false;
+
+    s->s_ht = hashtable_create();
+    if (s->s_ht == NULL) return NULL;
 
     /* print informations */
     logger_init(&s->s_logger, NULL);
@@ -100,25 +105,50 @@ void server_start_listening()
         request req;
         req.client_fd = client_sfd;
         sscanf(client_message, "%s %s HTTP/1.1", req.method, req.endpoint);
-        logger_print(&s->s_logger, INFO, "%s %s", req.method, req.endpoint);
 
-        if (strncmp("/", req.endpoint, strlen(req.endpoint)) == 0)
-        {
-            request *req_ptr = malloc(sizeof(request));
-            memcpy(req_ptr, &req, sizeof(request));
+        size_t size = strlen(req.method) + strlen(req.endpoint) + 2;
+        char *key = malloc(size);
+        snprintf(key, size, "%s %s", req.method, req.endpoint);
+        void *(*hdl_func)(request*, response*) = hashtable_get(s->s_ht, key);
+        free(key);
 
-            pthread_t thread;
-            pthread_create(&thread, NULL, endpoint_handler, req_ptr);
-            pthread_detach(thread);
-        }
+        /* TODO: handle non exisisting path */
+        if (hdl_func == NULL) continue;
+
+        req.hdl_func = hdl_func;
+        request *req_ptr = malloc(sizeof(request));
+        memcpy(req_ptr, &req, sizeof(request));
+
+        pthread_t thread;
+        pthread_create(&thread, NULL, endpoint_handler, req_ptr);
+        pthread_detach(thread);
 
         free(client_message);
     }
 }
 
+bool server_add_endpoint(char *method, char *endpoint, void *(*hdl_func)(request*, response*))
+{
+    if (method == NULL || endpoint == NULL || hdl_func == NULL)
+        return false;
+
+    size_t size = strlen(method) + strlen(endpoint) + 2;
+    char *key = malloc(size);
+    if (key == NULL) return false;
+
+    snprintf(key, size, "%s %s", method, endpoint);
+
+    hashtable_put(s->s_ht, key, hdl_func);
+
+    free(key);
+    return true;
+}
+
 void server_destroy()
 {
+    s->run = false;
     logger_destroy(&s->s_logger);
+    hashtable_destroy(s->s_ht);
     close(s->s_fd);
     free(s);
 }
@@ -129,15 +159,22 @@ bool EOR(const char *buf, const size_t len)
         && buf[len-3] == '\n' && buf[len-1] == '\n');
 }
 
-void *endpoint_handler(void *args)
+void *endpoint_handler(void *context)
 {
-    request *req_ptr = (request*)args;
+    request *req_ptr = (request*)context;
     request req;
     memcpy(&req, req_ptr, sizeof(request));
     free(req_ptr);
+    response res = { .status_code = 200, .status_message = "OK"};
 
-    char *response = "HTTP/1.1 200 OK\nServer: CServer\nContent-Length: 5\nContent-Type: text/plain\nConnection: close\n\nCiao\n";
-    send(req.client_fd, response, strlen(response), 0);
+    req.hdl_func(&req, &res);
+
+    snprintf(res.text, sizeof(res.text),
+            "HTTP/1.1 %d %s\r\nServer: CServer\r\nContent-Length: %ld\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n%s\r\n",
+            res.status_code, res.status_message, strlen(res.body), res.body);
+
+    send(req.client_fd, res.text, strlen(res.text), 0);
+    logger_print(&s->s_logger, INFO, "%s %s => Status %d %s", req.method, req.endpoint, res.status_code, res.status_message);
     close(req.client_fd);
 
     return NULL;

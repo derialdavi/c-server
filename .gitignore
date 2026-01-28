@@ -1,3 +1,7 @@
 .vscode
 bin
 so
+
+request.http
+todo.md
+runner.sh
