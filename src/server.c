@@ -1,6 +1,7 @@
 #include "server.h"
 
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
@@ -23,20 +24,46 @@ void sig_shutdown_server(int sig);
  */
 static server *s;
 
-server *server_setup(const int port)
+void server_setup(const int port, const char *filename)
 {
-    if (port <= 0 || port > 65'535) return NULL;
+    s = malloc(sizeof(server));
+    if (s == NULL)
+    {
+        perror("Error allocating memory for server");
+        exit(EXIT_FAILURE);
+    }
+
+    if (logger_init(&s->s_logger, filename) == false)
+    {
+        free(s);
+        exit(EXIT_FAILURE);
+    }
+
+    if (port <= 0 || port > 65'535)
+    {
+        logger_print(&s->s_logger, ERROR, "Invalid port number (%d)", port);
+        free(s);
+        exit(EXIT_FAILURE);
+    }
 
     /* create and setup socket */
-    s = malloc(sizeof(server));
-    if (s == NULL) return NULL;
-
     s->s_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (s->s_fd < 0) return NULL;
+    if (s->s_fd < 0)
+    {
+        char *err_message = strerror(errno);
+        logger_print(&s->s_logger, ERROR, "Error creating socket: %s", err_message);
+        free(s);
+        exit(EXIT_FAILURE);
+    }
 
     int opt = 1;
     if (setsockopt(s->s_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
-        return NULL;
+    {
+        char *err_message = strerror(errno);
+        logger_print(&s->s_logger, ERROR, "Error setting up socket: %s", err_message);
+        free(s);
+        exit(EXIT_FAILURE);
+    }
 
     /* bind socket with ip and port */
     struct sockaddr_in server_info = { 0 };
@@ -44,21 +71,59 @@ server *server_setup(const int port)
     server_info.sin_addr.s_addr = htonl(INADDR_ANY);
     server_info.sin_port = htons(port);
     if (bind(s->s_fd, (const struct sockaddr*)&server_info, sizeof(server_info)) < 0)
-        return NULL;
+    {
+        char *err_message = strerror(errno);
+        logger_print(&s->s_logger, ERROR, "Error binding socket: %s", err_message);
+        free(s);
+        exit(EXIT_FAILURE);
+    }
 
     /* adjust configuration */
     s->s_port = port;
     s->s_backlog = DEFAULT_BACKLOG;
     s->run = false;
-
     s->s_ht = hashtable_create();
-    if (s->s_ht == NULL) return NULL;
+    if (s->s_ht == NULL)
+    {
+        char *err_message = strerror(errno);
+        logger_print(&s->s_logger, ERROR, "Error allocating data for the server: %s", err_message);
+        free(s);
+        exit(EXIT_FAILURE);
+    }
 
     /* print informations */
-    logger_init(&s->s_logger, NULL);
+    logger_init(&s->s_logger, filename);
     logger_print(&s->s_logger, INFO, "Server created succesfully");
+}
 
-    return s;
+bool server_add_endpoint(char *method, char *endpoint, void *(*hdl_func)(request*, response*))
+{
+    if (method == NULL || endpoint == NULL || hdl_func == NULL)
+    {
+        logger_print(&s->s_logger, WARNING, "Invalid endpoint or handler function", method, endpoint);
+        return false;
+    }
+
+    size_t size = strlen(method) + strlen(endpoint) + 2;
+    char *key = malloc(size);
+    if (key == NULL)
+    {
+        char *err_message = strerror(errno);
+        logger_print(&s->s_logger, WARNING, "Failed to add |%s %s| endpoint: %s", method, endpoint, err_message);
+        return false;
+    }
+
+    snprintf(key, size, "%s %s", method, endpoint);
+
+    if (hashtable_put(s->s_ht, key, hdl_func) == false)
+    {
+        char *err_message = strerror(errno);
+        logger_print(&s->s_logger, WARNING, "Failed to add |%s %s| endpoint: %s", method, endpoint, err_message);
+        return false;
+    }
+
+    free(key);
+    return true;
 }
 
 void server_start_listening()
@@ -116,6 +181,8 @@ void server_start_listening()
         if (hdl_func == NULL) continue;
 
         req.hdl_func = hdl_func;
+
+        pthread_mutex_lock(&s->s_mutex);
         request *req_ptr = malloc(sizeof(request));
         memcpy(req_ptr, &req, sizeof(request));
 
@@ -127,28 +194,12 @@ void server_start_listening()
     }
 }
 
-bool server_add_endpoint(char *method, char *endpoint, void *(*hdl_func)(request*, response*))
-{
-    if (method == NULL || endpoint == NULL || hdl_func == NULL)
-        return false;
-
-    size_t size = strlen(method) + strlen(endpoint) + 2;
-    char *key = malloc(size);
-    if (key == NULL) return false;
-
-    snprintf(key, size, "%s %s", method, endpoint);
-
-    hashtable_put(s->s_ht, key, hdl_func);
-
-    free(key);
-    return true;
-}
-
 void server_destroy()
 {
     s->run = false;
     logger_destroy(&s->s_logger);
     hashtable_destroy(s->s_ht);
+    pthread_mutex_destroy(&s->s_mutex);
     close(s->s_fd);
     free(s);
 }
@@ -164,7 +215,9 @@ void *endpoint_handler(void *context)
     request *req_ptr = (request*)context;
     request req;
     memcpy(&req, req_ptr, sizeof(request));
+    pthread_mutex_unlock(&s->s_mutex);
     free(req_ptr);
+
     response res = { .status_code = 200, .status_message = "OK"};
 
     req.hdl_func(&req, &res);

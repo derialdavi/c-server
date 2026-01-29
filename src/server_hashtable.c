@@ -16,7 +16,11 @@ server_hashtable *hashtable_create()
     if (ht == NULL) return NULL;
 
     ht->buckets = calloc(INITIAL_BUCKETS_SIZE, sizeof(struct server_table_pair));
-    if (ht->buckets == NULL) return NULL;
+    if (ht->buckets == NULL)
+    {
+        free(ht);
+        return NULL;
+    }
 
     ht->buckets_size = INITIAL_BUCKETS_SIZE;
     ht->pair_num = 0;
@@ -26,8 +30,7 @@ server_hashtable *hashtable_create()
 
 bool hashtable_put(server_hashtable *ht, char *endpoint, void *(*hdl_func)(request*, response*))
 {
-    if (ht == NULL || endpoint == NULL || hdl_func == NULL)
-        return false;
+    /* args checks are done by higher levels */
 
     if (strncmp("", endpoint, 1) == 0)
         return false;

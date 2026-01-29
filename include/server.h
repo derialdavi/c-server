@@ -2,6 +2,7 @@
 #define __SERVER_H__
 
 #include <sys/types.h>
+#include <pthread.h>
 #include "server_hashtable.h"
 #include "logger.h"
 
@@ -22,12 +23,13 @@ typedef struct
     int s_backlog;
     logger s_logger;
     server_hashtable *s_ht;
+    pthread_mutex_t s_mutex;
     bool run;
 } server;
 
-server *server_setup(const int);
-void server_start_listening();
+void server_setup(const int, const char *);
 bool server_add_endpoint(char *, char *, void*(*)(request*, response*));
+void server_start_listening();
 void server_destroy();
 
 #endif
