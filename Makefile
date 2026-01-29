@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-Wall -Wextra -Werror -std=c2x -I./include -D_GNU_SOURCE
+CFLAGS=-Wall -Wextra -Werror -std=c2x -I./include -D_GNU_SOURCE -fPIC
 DEBFLAGS=-g
 LINKERFLAGS=-lserver -lhashtable -llogger -Wl,-rpath,'$$ORIGIN/../so'
 
@@ -16,22 +16,29 @@ SERVER_SO=$(SODIR)/libserver.so
 HASHTABLE_SO=$(SODIR)/libhashtable.so
 LOGGER_SO=$(SODIR)/liblogger.so
 
-.PHONY: all build-libs debug clean
+.PHONY: all debug clean
 
 all: build-libs
 	@mkdir -p $(BINDIR)
 	$(CC) $(CFLAGS) $(SRC) -o $(BINDIR)/server -L$(SODIR) $(LINKERFLAGS)
 
-build-libs:
+$(SERVER_SO): $(SERVER_SRCS)
 	@mkdir -p $(SODIR)
-	$(CC) -shared -o $(SERVER_SO) -fPIC $(SERVER_SRCS) $(CFLAGS)
-	$(CC) -shared -o $(HASHTABLE_SO) -fPIC $(HASHTABLE_SRCS) $(CFLAGS)
-	$(CC) -shared -o $(LOGGER_SO) -fPIC $(LOGGER_SRCS) $(CFLAGS)
+	$(CC) -shared -fPIC $(CFLAGS) $< -o $@
+
+$(HASHTABLE_SO): $(HASHTABLE_SRCS)
+	@mkdir -p $(SODIR)
+	$(CC) -shared -fPIC $(CFLAGS) $< -o $@
+
+$(LOGGER_SO): $(LOGGER_SRCS)
+	@mkdir -p $(SODIR)
+	$(CC) -shared -fPIC $(CFLAGS) $< -o $@
+
+build-libs: $(SERVER_SO) $(HASHTABLE_SO) $(LOGGER_SO)
 
 debug: build-libs
 	@mkdir -p $(BINDIR)
 	$(CC) $(CFLAGS) $(DEBFLAGS) $(SRC) -o $(BINDIR)/debug_server -L$(SODIR) $(LINKERFLAGS)
 
 clean:
-	rm -rf $(BINDIR)/*
-	rm -rf $(SODIR)/*
+	rm -rf $(BINDIR)/* $(SODIR)/*
