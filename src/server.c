@@ -82,6 +82,7 @@ void server_setup(const int port, const char *filename)
     s->s_port = port;
     s->s_backlog = DEFAULT_BACKLOG;
     s->run = false;
+    pthread_mutex_init(&s->s_mutex, NULL);
     s->s_ht = hashtable_create();
     if (s->s_ht == NULL)
     {
@@ -167,27 +168,31 @@ void server_start_listening()
         }
         client_message[total_length] = '\0';
 
-        request req;
-        req.client_fd = client_sfd;
-        sscanf(client_message, "%s %s HTTP/1.1", req.method, req.endpoint);
+        char method[8];
+        char endpoint[256];
+        sscanf(client_message, "%s %s HTTP/1.1", method, endpoint);
 
-        size_t size = strlen(req.method) + strlen(req.endpoint) + 2;
+        size_t size = strlen(method) + strlen(endpoint) + 2;
         char *key = malloc(size);
-        snprintf(key, size, "%s %s", req.method, req.endpoint);
+        snprintf(key, size, "%s %s", method, endpoint);
         void *(*hdl_func)(request*, response*) = hashtable_get(s->s_ht, key);
         free(key);
 
         /* TODO: handle non exisisting path */
         if (hdl_func == NULL) continue;
 
+        /* lock the resource so that if server recieves a   */
+        /* new request it doesn't overwrite the memory that */
+        /* the old thread points to.                        */
+        pthread_mutex_lock(&s->s_mutex);
+        request req;
+        req.client_fd = client_sfd;
+        strncpy(req.method, method, sizeof(req.method));
+        strncpy(req.endpoint, endpoint, sizeof(req.endpoint));
         req.hdl_func = hdl_func;
 
-        pthread_mutex_lock(&s->s_mutex);
-        request *req_ptr = malloc(sizeof(request));
-        memcpy(req_ptr, &req, sizeof(request));
-
         pthread_t thread;
-        pthread_create(&thread, NULL, endpoint_handler, req_ptr);
+        pthread_create(&thread, NULL, endpoint_handler, &req);
         pthread_detach(thread);
 
         free(client_message);
@@ -212,11 +217,9 @@ bool EOR(const char *buf, const size_t len)
 
 void *endpoint_handler(void *context)
 {
-    request *req_ptr = (request*)context;
-    request req;
-    memcpy(&req, req_ptr, sizeof(request));
+
+    request req = (*(request*)context);
     pthread_mutex_unlock(&s->s_mutex);
-    free(req_ptr);
 
     response res = { .status_code = 200, .status_message = "OK"};
 
