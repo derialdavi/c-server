@@ -17,12 +17,16 @@
 bool EOR(const char *buf, const size_t len);
 void *endpoint_handler(void *args);
 void sig_shutdown_server(int sig);
+void bind_server(int port);
+int accept_client();
+char *read_client_message(int client_sfd);
+bool is_valid_method(const char* method_string);
 
 /* declaring the server variable global in order
  * to make operations on it when terminating the
  * process.
  */
-static server *s;
+server *s;
 
 void server_setup(const int port, const char *filename)
 {
@@ -66,17 +70,7 @@ void server_setup(const int port, const char *filename)
     }
 
     /* bind socket with ip and port */
-    struct sockaddr_in server_info = { 0 };
-    server_info.sin_family = AF_INET;
-    server_info.sin_addr.s_addr = htonl(INADDR_ANY);
-    server_info.sin_port = htons(port);
-    if (bind(s->s_fd, (const struct sockaddr*)&server_info, sizeof(server_info)) < 0)
-    {
-        char *err_message = strerror(errno);
-        logger_print(&s->s_logger, ERROR, "Error binding socket: %s", err_message);
-        free(s);
-        exit(EXIT_FAILURE);
-    }
+    bind_server(port);
 
     /* adjust configuration */
     s->s_port = port;
@@ -105,6 +99,7 @@ bool server_add_endpoint(char *method, char *endpoint, void *(*hdl_func)(request
         return false;
     }
 
+    /* concatenate method and path */
     size_t size = strlen(method) + strlen(endpoint) + 2;
     char *key = malloc(size);
     if (key == NULL)
@@ -116,6 +111,7 @@ bool server_add_endpoint(char *method, char *endpoint, void *(*hdl_func)(request
 
     snprintf(key, size, "%s %s", method, endpoint);
 
+    /* insert pair into table */
     if (hashtable_put(s->s_ht, key, hdl_func) == false)
     {
         char *err_message = strerror(errno);
@@ -142,9 +138,7 @@ void server_start_listening()
     while (s->run)
     {
         /* accept client */
-        struct sockaddr_in client_info;
-        int client_len = sizeof(client_info);
-        int client_sfd = accept(s->s_fd, (struct sockaddr*)&client_info, (socklen_t*)&client_len);
+        int client_sfd = accept_client();
         if (client_sfd < 0)
         {
             logger_print(&s->s_logger, ERROR, "Error accepting client");
@@ -152,50 +146,34 @@ void server_start_listening()
         }
 
         /* recieve client data */
-        char client_buf[DEFAULT_CLIENT_BUFFER_SIZE];
-        char *client_message = malloc(0);
-        int bytes_read, i = 0, total_length = 0;
-        while ((bytes_read = recv(client_sfd, client_buf, DEFAULT_CLIENT_BUFFER_SIZE, 0)) > 0)
-        {
-            total_length += bytes_read;
-            client_message = realloc(client_message, total_length + 1);
-            strncpy(client_message + (total_length - bytes_read), client_buf, bytes_read);
+        char *client_message = read_client_message(client_sfd);
 
-            /* check for end of request message since recv waits until connection is closed */
-            if (EOR(client_buf, bytes_read))
-                break;
-            i++;
-        }
-        client_message[total_length] = '\0';
-
-        char method[8];
-        char endpoint[256];
-        sscanf(client_message, "%s %s HTTP/1.1", method, endpoint);
-
-        size_t size = strlen(method) + strlen(endpoint) + 2;
-        char *key = malloc(size);
-        snprintf(key, size, "%s %s", method, endpoint);
-        void *(*hdl_func)(request*, response*) = hashtable_get(s->s_ht, key);
-        free(key);
-
-        /* TODO: handle non exisisting path */
-        if (hdl_func == NULL) continue;
-
-        /* lock the resource so that if server recieves a   */
-        /* new request it doesn't overwrite the memory that */
-        /* the old thread points to.                        */
+        /* parse request */
+        char error_message[256];
         pthread_mutex_lock(&s->s_mutex);
         request req;
+        if (request_parse(client_message, error_message, &req) == false)
+        {
+            free(client_message);
+            logger_print(&s->s_logger, WARNING, "%s", error_message);
+            continue;
+        }
+        free(client_message);
+
+        if (req.hdl_func == NULL)
+        {
+            logger_print(&s->s_logger, INFO, "%s %s => Status 404 Not found", req.method, req.path);
+            close(client_sfd); // TODO: send response to client
+            continue;
+        }
+
         req.client_fd = client_sfd;
-        strncpy(req.method, method, sizeof(req.method));
-        strncpy(req.endpoint, endpoint, sizeof(req.endpoint));
-        req.hdl_func = hdl_func;
+
 
         pthread_t thread;
         pthread_create(&thread, NULL, endpoint_handler, &req);
         pthread_detach(thread);
 
-        free(client_message);
     }
 }
 
@@ -217,11 +195,10 @@ bool EOR(const char *buf, const size_t len)
 
 void *endpoint_handler(void *context)
 {
-
     request req = (*(request*)context);
     pthread_mutex_unlock(&s->s_mutex);
 
-    response res = { .status_code = 200, .status_message = "OK"};
+    response res = { .status_code = STATUS_OK, .status_message = "OK"};
 
     req.hdl_func(&req, &res);
 
@@ -230,7 +207,7 @@ void *endpoint_handler(void *context)
             res.status_code, res.status_message, strlen(res.body), res.body);
 
     send(req.client_fd, res.text, strlen(res.text), 0);
-    logger_print(&s->s_logger, INFO, "%s %s => Status %d %s", req.method, req.endpoint, res.status_code, res.status_message);
+    logger_print(&s->s_logger, INFO, "%s %s => Status %d %s", req.method, req.path, res.status_code, res.status_message);
     close(req.client_fd);
 
     return NULL;
@@ -241,4 +218,48 @@ void sig_shutdown_server(int sig)
     (void)sig;
     server_destroy();
     exit(EXIT_SUCCESS);
+}
+
+void bind_server(int port)
+{
+    struct sockaddr_in server_info = { 0 };
+    server_info.sin_family = AF_INET;
+    server_info.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_info.sin_port = htons(port);
+    if (bind(s->s_fd, (const struct sockaddr*)&server_info, sizeof(server_info)) < 0)
+    {
+        char *err_message = strerror(errno);
+        logger_print(&s->s_logger, ERROR, "Error binding socket: %s", err_message);
+        free(s);
+        exit(EXIT_FAILURE);
+    }
+}
+
+int accept_client()
+{
+    struct sockaddr_in client_info;
+    int client_len = sizeof(client_info);
+    return accept(s->s_fd, (struct sockaddr*)&client_info, (socklen_t*)&client_len);
+}
+
+char *read_client_message(int client_sfd)
+{
+    char client_buf[DEFAULT_CLIENT_BUFFER_SIZE];
+    char *client_message = malloc(0);
+    int bytes_read, i = 0, total_length = 0;
+
+    while ((bytes_read = recv(client_sfd, client_buf, DEFAULT_CLIENT_BUFFER_SIZE, 0)) > 0)
+    {
+        total_length += bytes_read;
+        client_message = realloc(client_message, total_length + 1);
+        strncpy(client_message + (total_length - bytes_read), client_buf, bytes_read);
+
+        /* check for end of request message since recv waits until connection is closed */
+        if (EOR(client_buf, bytes_read))
+            break;
+        i++;
+    }
+    client_message[total_length] = '\0';
+
+    return client_message;
 }

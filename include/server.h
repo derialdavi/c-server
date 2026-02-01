@@ -5,16 +5,11 @@
 #include <pthread.h>
 #include "server_hashtable.h"
 #include "logger.h"
+#include "http_methods.h"
+#include "http_status_codes.h"
 
 #define DEFAULT_BACKLOG            ((int)5)
 #define DEFAULT_CLIENT_BUFFER_SIZE ((size_t)4096)
-
-#define GET     "GET"
-#define POST    "POST"
-#define OPTIONS "OPTIONS"
-#define DELETE  "DELETE"
-#define PUT     "PUT"
-#define PATCH   "PATCH"
 
 typedef struct
 {

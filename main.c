@@ -6,13 +6,13 @@
 
 void *handler1(request *context, response *res)
 {
-    (void)context;
+    printf("Gli headers sono:\n%s\n", context->headers);
     strcpy(res->body, "Handler 1");
     return NULL;
 }
 void *handler2(request *context, response *res)
 {
-    (void)context;
+    printf("Gli headers sono %s\n", context->headers);
     strcpy(res->body, "Handler 2");
     return NULL;
 }
